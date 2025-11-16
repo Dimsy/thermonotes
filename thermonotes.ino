@@ -45,6 +45,361 @@ String lastPrintDate = "";
 // Семафор для защиты общих ресурсов
 SemaphoreHandle_t xSemaphore;
 
+// Переменные для управления WiFi
+unsigned long lastWifiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL = 30000;
+bool wifiConnected = false;
+int wifiReconnectAttempts = 0;
+const int MAX_RECONNECT_ATTEMPTS = 5;
+
+// Переменные для кэширования
+String cachedHomePage = "";
+unsigned long lastCacheUpdate = 0;
+const unsigned long CACHE_UPDATE_INTERVAL = 30000;
+
+// HTML страница с формой и историей (упрощенная версия)
+const char* htmlPage = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 Printer</title>
+  <style>
+    body { 
+      font-family: Arial, sans-serif; 
+      text-align: center; 
+      margin: 10px;
+      background: #f0f0f0;
+    }
+    .container {
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      max-width: 500px;
+      margin: 0 auto;
+    }
+    .form-section {
+      margin-bottom: 20px;
+      padding: 15px;
+      border-bottom: 1px solid #ddd;
+    }
+    .history-section {
+      text-align: left;
+    }
+    input[type="text"] {
+      width: 65%;
+      padding: 10px;
+      margin: 5px 0;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    input[type="submit"] {
+      background: #4CAF50;
+      color: white;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .print-btn {
+      background: #2196F3;
+      color: white;
+      padding: 5px 10px;
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+      margin-left: 8px;
+    }
+    .weather-btn {
+      background: #FF9800;
+      color: white;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin: 8px 5px;
+    }
+    .history-item {
+      background: #f8f9fa;
+      margin: 8px 0;
+      padding: 10px;
+      border-radius: 4px;
+      border-left: 3px solid #4CAF50;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .message-content {
+      flex-grow: 1;
+    }
+    .history-header {
+      color: #333;
+      margin-bottom: 15px;
+      font-size: 18px;
+    }
+    .empty-history {
+      color: #666;
+      font-style: italic;
+      padding: 15px;
+    }
+    .timestamp {
+      color: #888;
+      font-size: 11px;
+      margin-top: 3px;
+    }
+    .message-text {
+      color: #333;
+      font-size: 14px;
+      word-break: break-word;
+    }
+    .current-time {
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 15px;
+    }
+    .info-note {
+      color: #666;
+      font-size: 11px;
+      margin-top: 8px;
+    }
+    .input-group {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .weather-section {
+      margin: 15px 0;
+      padding: 15px;
+      background: #e3f2fd;
+      border-radius: 6px;
+    }
+    .auto-print-info {
+      background: #e8f5e8;
+      padding: 8px;
+      border-radius: 4px;
+      margin: 8px 0;
+      font-size: 12px;
+    }
+    .weather-display {
+      font-size: 18px;
+      margin: 10px 0;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.8);
+      border-radius: 6px;
+    }
+    .weather-icon {
+      font-size: 32px;
+      margin: 5px 0;
+    }
+    .temperature {
+      font-size: 24px;
+      font-weight: bold;
+      color: #2196F3;
+    }
+    .forecast-item {
+      display: inline-block;
+      margin: 0 10px;
+      padding: 8px;
+      background: rgba(255, 255, 255, 0.9);
+      border-radius: 4px;
+    }
+    .wifi-status {
+      margin: 8px 0;
+      padding: 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: bold;
+    }
+    .wifi-connected {
+      background: #e8f5e8;
+      color: #2e7d32;
+    }
+    .wifi-disconnected {
+      background: #ffebee;
+      color: #c62828;
+    }
+    h1 {
+      color: #333;
+      margin-bottom: 8px;
+      font-size: 1.8em;
+    }
+    h3 {
+      color: #555;
+      margin-bottom: 10px;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🌤️ ESP32 Принтер</h1>
+    <div class="current-time" id="currentTime"></div>
+    
+    <div class="wifi-status" id="wifiStatus">
+      <span id="wifiIcon">📶</span>
+      <span id="wifiText">Проверка...</span>
+    </div>
+    
+    <div class="auto-print-info">
+      <strong>Автопечать:</strong> погода печатается каждый день в 10:00
+    </div>
+    
+    <div class="weather-section">
+      <h3>Погода в Москве</h3>
+      <div class="weather-display">
+        <div class="weather-icon" id="weatherIcon">⏳</div>
+        <div class="temperature" id="weatherTemp">Загрузка...</div>
+      </div>
+      <div class="forecast">
+        <div class="forecast-item">
+          <div>15:00</div>
+          <div id="temp15">--°C</div>
+        </div>
+        <div class="forecast-item">
+          <div>19:00</div>
+          <div id="temp19">--°C</div>
+        </div>
+      </div>
+      <button class="weather-btn" onclick="printWeather()">🖨️ Печать погоды</button>
+    </div>
+    
+    <div class="form-section">
+      <h3>Отправить сообщение</h3>
+      <form action="/submit" method="POST" id="messageForm">
+        <div class="input-group">
+          <input type="text" name="inputValue" id="inputValue" placeholder="Введите сообщение..." required>
+          <input type="submit" value="📤 Отправить">
+        </div>
+      </form>
+      <div class="info-note">Кириллица преобразуется в латиницу на принтере</div>
+    </div>
+
+    <div class="history-section">
+      <h3 class="history-header">История сообщений</h3>
+      <div id="historyList">
+        )rawliteral";
+
+// Вторая часть HTML (упрощенная)
+String getHtmlPageEnd() {
+  return R"rawliteral(
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    function updateCurrentTime() {
+      const now = new Date();
+      const timeString = now.toLocaleString('ru-RU', {
+        timeZone: 'Europe/Moscow',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      document.getElementById('currentTime').textContent = 'Время: ' + timeString;
+    }
+    
+    function updateWifiStatus() {
+      fetch('/wifi-status')
+        .then(response => response.json())
+        .then(data => {
+          const wifiStatus = document.getElementById('wifiStatus');
+          const wifiIcon = document.getElementById('wifiIcon');
+          const wifiText = document.getElementById('wifiText');
+          
+          if (data.connected) {
+            wifiStatus.className = 'wifi-status wifi-connected';
+            wifiIcon.textContent = '📶';
+            wifiText.textContent = 'WiFi: ' + data.ip;
+          } else {
+            wifiStatus.className = 'wifi-status wifi-disconnected';
+            wifiIcon.textContent = '❌';
+            wifiText.textContent = 'Нет WiFi';
+          }
+        })
+        .catch(error => {
+          console.error('WiFi status error:', error);
+        });
+    }
+    
+    function printMessage(index) {
+      fetch('/print?index=' + index)
+        .then(response => response.text())
+        .then(result => {
+          alert(result);
+        });
+    }
+    
+    function printWeather() {
+      fetch('/print-weather')
+        .then(response => response.text())
+        .then(result => {
+          alert(result);
+        });
+    }
+    
+    function updateWeather() {
+      fetch('/weather-data')
+        .then(response => response.json())
+        .then(data => {
+          document.getElementById('weatherIcon').textContent = data.icon;
+          document.getElementById('weatherTemp').textContent = data.temperature;
+          document.getElementById('temp15').textContent = data.temp15 + '°C';
+          document.getElementById('temp19').textContent = data.temp19 + '°C';
+        })
+        .catch(error => {
+          console.error('Weather error:', error);
+        });
+    }
+    
+    // Обновляем время каждые 30 секунд
+    updateCurrentTime();
+    setInterval(updateCurrentTime, 30000);
+    
+    // Обновляем статус WiFi каждые 10 секунд
+    updateWifiStatus();
+    setInterval(updateWifiStatus, 10000);
+    
+    // Обновляем погоду каждые 10 минут
+    updateWeather();
+    setInterval(updateWeather, 600000);
+    
+    // Обновляем историю каждые 5 секунд
+    setInterval(function() {
+      fetch('/history')
+        .then(response => response.text())
+        .then(html => {
+          document.getElementById('historyList').innerHTML = html;
+        });
+    }, 5000);
+  </script>
+</body>
+</html>
+)rawliteral";
+}
+
+// Функция для получения кэшированной главной страницы
+String getCachedHomePage() {
+  if (cachedHomePage == "" || millis() - lastCacheUpdate > CACHE_UPDATE_INTERVAL) {
+    // Обновляем кэш
+    cachedHomePage = String(htmlPage);
+    cachedHomePage += getHistoryHTML();
+    cachedHomePage += getHtmlPageEnd();
+    lastCacheUpdate = millis();
+    Serial.println("🔄 Кэш главной страницы обновлен");
+  }
+  return cachedHomePage;
+}
+
 // Функция инициализации термопринтера
 void initThermalPrinter() {
   ThermalPrinter.begin(9600, SERIAL_8N1, PRINTER_RX_PIN, PRINTER_TX_PIN);
@@ -53,6 +408,80 @@ void initThermalPrinter() {
   ThermalPrinter.println("Printer initialized");
   delay(500);
   Serial.println("Thermal printer ready");
+}
+
+// Функция для подключения к WiFi с повторными попытками
+bool connectToWiFi() {
+  Serial.println("Подключение к WiFi...");
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+  
+  WiFi.disconnect(true);
+  delay(1000);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+    if (attempts % 10 == 0) {
+      Serial.println();
+    }
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ Успешное подключение к WiFi!");
+    Serial.print("📡 IP адрес: ");
+    Serial.println(WiFi.localIP());
+    wifiConnected = true;
+    wifiReconnectAttempts = 0;
+    
+    // Печатаем сообщение о подключении
+    String wifiMessage = "Uspeshnoe podklyuchenie k WiFi! IP: " + WiFi.localIP().toString();
+    printToThermalPrinter(wifiMessage);
+    
+    return true;
+  } else {
+    Serial.println("\n❌ Не удалось подключиться к WiFi");
+    wifiConnected = false;
+    return false;
+  }
+}
+
+// Функция проверки и восстановления WiFi соединения
+void checkWiFiConnection() {
+  if (millis() - lastWifiCheck > WIFI_CHECK_INTERVAL) {
+    lastWifiCheck = millis();
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      wifiConnected = false;
+      Serial.println("❌ Потеряно соединение с WiFi");
+      
+      if (wifiReconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        wifiReconnectAttempts++;
+        Serial.print("🔄 Попытка переподключения #");
+        Serial.println(wifiReconnectAttempts);
+        
+        if (connectToWiFi()) {
+          Serial.println("✅ WiFi соединение восстановлено");
+        } else {
+          Serial.println("❌ Не удалось восстановить WiFi соединение");
+        }
+      } else {
+        Serial.println("⚠️ Достигнуто максимальное количество попыток переподключения");
+        Serial.println("🔄 Перезагрузка ESP32 через 10 секунд...");
+        delay(10000);
+        ESP.restart();
+      }
+    } else {
+      if (!wifiConnected) {
+        wifiConnected = true;
+        Serial.println("✅ WiFi соединение активно");
+      }
+    }
+  }
 }
 
 // Функция транслитерации кириллицы в латиницу
@@ -229,6 +658,11 @@ String getCurrentDate() {
 
 // Функция для получения текущей погоды из Open-Meteo
 String getCurrentWeather() {
+  // Проверяем подключение к WiFi перед запросом
+  if (WiFi.status() != WL_CONNECTED) {
+    return "❓ Нет подключения к WiFi";
+  }
+  
   HTTPClient http;
   
   String url = "https://api.open-meteo.com/v1/forecast?";
@@ -374,6 +808,11 @@ String getWeatherDescription(int weatherCode) {
 
 // Функция для получения температуры на определенное время
 float getTemperatureForTime(String targetTime) {
+  // Проверяем подключение к WiFi перед запросом
+  if (WiFi.status() != WL_CONNECTED) {
+    return -999;
+  }
+  
   HTTPClient http;
   
   String url = "https://api.open-meteo.com/v1/forecast?";
@@ -442,28 +881,30 @@ void printWeatherInfo() {
   String monthName = transliterate(getMonthName());
   
   // Получаем данные о погоде
-  HTTPClient http;
-  String url = "https://api.open-meteo.com/v1/forecast?";
-  url += "latitude=" + String(MOSCOW_LAT, 6);
-  url += "&longitude=" + String(MOSCOW_LON, 6);
-  url += "&current=temperature_2m,weather_code";
-  url += "&timezone=Europe/Moscow";
-  
-  http.begin(url);
-  int httpCode = http.GET();
-  
   float currentTemp = -999;
   int weatherCode = -1;
   
-  if (httpCode == 200) {
-    String payload = http.getString();
-    DynamicJsonDocument doc(1024);
-    deserializeJson(doc, payload);
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = "https://api.open-meteo.com/v1/forecast?";
+    url += "latitude=" + String(MOSCOW_LAT, 6);
+    url += "&longitude=" + String(MOSCOW_LON, 6);
+    url += "&current=temperature_2m,weather_code";
+    url += "&timezone=Europe/Moscow";
     
-    currentTemp = doc["current"]["temperature_2m"];
-    weatherCode = doc["current"]["weather_code"];
+    http.begin(url);
+    int httpCode = http.GET();
+    
+    if (httpCode == 200) {
+      String payload = http.getString();
+      DynamicJsonDocument doc(1024);
+      deserializeJson(doc, payload);
+      
+      currentTemp = doc["current"]["temperature_2m"];
+      weatherCode = doc["current"]["weather_code"];
+    }
+    http.end();
   }
-  http.end();
   
   // Печатаем дату
   String dateLine = dayOfWeek + ", " + currentDate + " " + monthName;
@@ -480,12 +921,16 @@ void printWeatherInfo() {
   if (currentTemp != -999) {
     String tempLine = "Temperature: " + String(currentTemp, 1) + "C";
     ThermalPrinter.println(tempLine);
+  } else {
+    ThermalPrinter.println("Temperature: No data");
   }
   
   // Печатаем описание погоды
   if (weatherCode != -1) {
     String weatherDesc = getWeatherDescription(weatherCode);
     ThermalPrinter.println("Weather: " + weatherDesc);
+  } else {
+    ThermalPrinter.println("Weather: No data");
   }
    
   // Печатаем прогноз на день
@@ -523,335 +968,6 @@ void checkAutoPrint() {
   } else if (currentTime == "00:01") {
     todayPrinted = false;
   }
-}
-
-// HTML страница с формой и историей (без изменений)
-const char* htmlPage = R"rawliteral(
-<!DOCTYPE HTML>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ESP32 Weather Station</title>
-  <style>
-    body { 
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-      text-align: center; 
-      margin: 0;
-      padding: 20px;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-    }
-    .container {
-      background: rgba(255, 255, 255, 0.95);
-      padding: 30px;
-      border-radius: 20px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-      max-width: 600px;
-      margin: 0 auto;
-      backdrop-filter: blur(10px);
-    }
-    .form-section {
-      margin-bottom: 30px;
-      padding: 20px;
-      border-bottom: 2px solid #eee;
-    }
-    .history-section {
-      text-align: left;
-    }
-    input[type="text"] {
-      width: 70%;
-      padding: 15px;
-      margin: 10px 0;
-      border: 2px solid #ddd;
-      border-radius: 12px;
-      font-size: 16px;
-      transition: all 0.3s;
-    }
-    input[type="text"]:focus {
-      border-color: #667eea;
-      box-shadow: 0 0 10px rgba(102, 126, 234, 0.3);
-      outline: none;
-    }
-    input[type="submit"] {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 15px 30px;
-      border: none;
-      border-radius: 12px;
-      cursor: pointer;
-      font-size: 16px;
-      margin-left: 10px;
-      transition: all 0.3s;
-      font-weight: bold;
-    }
-    input[type="submit"]:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-    }
-    .print-btn {
-      background: #2196F3;
-      color: white;
-      padding: 8px 15px;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 12px;
-      margin-left: 10px;
-      transition: all 0.3s;
-    }
-    .print-btn:hover {
-      background: #1976D2;
-      transform: translateY(-1px);
-    }
-    .weather-btn {
-      background: linear-gradient(135deg, #FF9800 0%, #F57C00 100%);
-      color: white;
-      padding: 15px 30px;
-      border: none;
-      border-radius: 12px;
-      cursor: pointer;
-      font-size: 16px;
-      margin: 10px 5px;
-      transition: all 0.3s;
-      font-weight: bold;
-    }
-    .weather-btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 5px 15px rgba(255, 152, 0, 0.4);
-    }
-    .history-item {
-      background: #f8f9fa;
-      margin: 10px 0;
-      padding: 15px;
-      border-radius: 12px;
-      border-left: 4px solid #667eea;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      transition: all 0.3s;
-    }
-    .history-item:hover {
-      transform: translateX(5px);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    }
-    .message-content {
-      flex-grow: 1;
-    }
-    .history-header {
-      color: #333;
-      margin-bottom: 20px;
-      font-size: 24px;
-      font-weight: bold;
-    }
-    .empty-history {
-      color: #666;
-      font-style: italic;
-      padding: 20px;
-    }
-    .timestamp {
-      color: #888;
-      font-size: 12px;
-      margin-top: 5px;
-    }
-    .message-text {
-      color: #333;
-      font-size: 16px;
-      word-break: break-word;
-    }
-    .current-time {
-      color: #666;
-      font-size: 16px;
-      margin-bottom: 20px;
-      font-weight: bold;
-    }
-    .info-note {
-      color: #666;
-      font-size: 12px;
-      margin-top: 10px;
-      font-style: italic;
-    }
-    .input-group {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .weather-section {
-      margin: 20px 0;
-      padding: 20px;
-      background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
-      border-radius: 15px;
-      box-shadow: 0 4px 15px rgba(33, 150, 243, 0.2);
-    }
-    .auto-print-info {
-      background: linear-gradient(135deg, #e8f5e8 0%, #c8e6c9 100%);
-      padding: 15px;
-      border-radius: 10px;
-      margin: 10px 0;
-      font-size: 14px;
-      box-shadow: 0 2px 8px rgba(76, 175, 80, 0.2);
-    }
-    .weather-display {
-      font-size: 24px;
-      margin: 15px 0;
-      padding: 15px;
-      background: rgba(255, 255, 255, 0.8);
-      border-radius: 12px;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-    }
-    .weather-icon {
-      font-size: 48px;
-      margin: 10px 0;
-    }
-    .temperature {
-      font-size: 32px;
-      font-weight: bold;
-      color: #2196F3;
-    }
-    .forecast-item {
-      display: inline-block;
-      margin: 0 15px;
-      padding: 10px;
-      background: rgba(255, 255, 255, 0.9);
-      border-radius: 10px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-    }
-    h1 {
-      color: #333;
-      margin-bottom: 10px;
-      font-size: 2.5em;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    h3 {
-      color: #555;
-      margin-bottom: 15px;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>🌤️ ESP32 Погодная Станция</h1>
-    <div class="current-time" id="currentTime"></div>
-    
-    <div class="auto-print-info">
-      <strong>📅 Автоматическая печать:</strong> информация о погоде печатается автоматически каждый день в 10:00
-    </div>
-    
-    <div class="weather-section">
-      <h3>🌍 Погода в Москве</h3>
-      <div class="weather-display">
-        <div class="weather-icon" id="weatherIcon">⏳</div>
-        <div class="temperature" id="weatherTemp">Загрузка...</div>
-      </div>
-      <div class="forecast">
-        <div class="forecast-item">
-          <div>🕒 15:00</div>
-          <div id="temp15">--°C</div>
-        </div>
-        <div class="forecast-item">
-          <div>🕖 19:00</div>
-          <div id="temp19">--°C</div>
-        </div>
-      </div>
-      <button class="weather-btn" onclick="printWeather()">🖨️ Печать погоды и даты</button>
-      <div class="info-note">Теперь с широкими ASCII-иконками на термопринтере!</div>
-    </div>
-    
-    <div class="form-section">
-      <h3>✉️ Отправить новое сообщение</h3>
-      <form action="/submit" method="POST" id="messageForm">
-        <div class="input-group">
-          <input type="text" name="inputValue" id="inputValue" placeholder="Введите ваше сообщение..." required>
-          <input type="submit" value="📤 Отправить">
-        </div>
-      </form>
-      <div class="info-note">Кириллица будет преобразована в латиницу на принтере</div>
-    </div>
-
-    <div class="history-section">
-      <h3 class="history-header">📚 История сообщений</h3>
-      <div id="historyList">
-        )rawliteral";
-
-// Вторая часть HTML
-String getHtmlPageEnd() {
-  return R"rawliteral(
-      </div>
-    </div>
-  </div>
-  
-  <script>
-    function updateCurrentTime() {
-      const now = new Date();
-      const timeString = now.toLocaleString('ru-RU', {
-        timeZone: 'Europe/Moscow',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-      });
-      document.getElementById('currentTime').textContent = '🕐 Текущее московское время: ' + timeString;
-    }
-    
-    function printMessage(index) {
-      fetch('/print?index=' + index)
-        .then(response => response.text())
-        .then(result => {
-          alert(result);
-        });
-    }
-    
-    function printWeather() {
-      fetch('/print-weather')
-        .then(response => response.text())
-        .then(result => {
-          alert(result);
-        });
-    }
-    
-    function updateWeather() {
-      fetch('/weather-data')
-        .then(response => response.json())
-        .then(data => {
-          document.getElementById('weatherIcon').textContent = data.icon;
-          document.getElementById('weatherTemp').textContent = data.temperature;
-          document.getElementById('temp15').textContent = data.temp15 + '°C';
-          document.getElementById('temp19').textContent = data.temp19 + '°C';
-        })
-        .catch(error => {
-          console.error('Error fetching weather:', error);
-          document.getElementById('weatherIcon').textContent = '❌';
-          document.getElementById('weatherTemp').textContent = 'Ошибка';
-        });
-    }
-    
-    // Обновляем время каждую секунду
-    updateCurrentTime();
-    setInterval(updateCurrentTime, 1000);
-    
-    // Обновляем погоду каждые 5 минут
-    updateWeather();
-    setInterval(updateWeather, 300000);
-    
-    // Автоматическое обновление истории каждые 3 секунды
-    setInterval(function() {
-      fetch('/history')
-        .then(response => response.text())
-        .then(html => {
-          document.getElementById('historyList').innerHTML = html;
-        });
-    }, 3000);
-  </script>
-</body>
-</html>
-)rawliteral";
 }
 
 // Функция для получения московского времени в формате HH:MM:SS
@@ -896,16 +1012,31 @@ String getHistoryHTML() {
   
   if (xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
     if (historyCount == 0) {
-      historyHtml = "<div class='empty-history'>История сообщений пуста</div>";
+      historyHtml = "<div class='empty-history'>Нет сообщений</div>";
     } else {
-      for (int i = historyCount - 1; i >= 0; i--) {
+      // Показываем только последние 5 сообщений для скорости
+      int startIndex = (historyCount > 5) ? historyCount - 5 : 0;
+      for (int i = historyCount - 1; i >= startIndex; i--) {
         historyHtml += "<div class='history-item'>";
         historyHtml += "<div class='message-content'>";
-        historyHtml += "<div class='message-text'><strong>" + messageHistory[i].text + "</strong></div>";
-        historyHtml += "<div class='timestamp'>Отправлено: " + messageHistory[i].timestamp + "</div>";
+        
+        // Обрезаем длинные сообщения
+        String displayText = messageHistory[i].text;
+        if (displayText.length() > 50) {
+          displayText = displayText.substring(0, 47) + "...";
+        }
+        historyHtml += "<div class='message-text'>" + displayText + "</div>";
+        
+        // Упрощенная временная метка
+        String shortTime = messageHistory[i].timestamp.substring(11, 16);
+        historyHtml += "<div class='timestamp'>" + shortTime + "</div>";
         historyHtml += "</div>";
-        historyHtml += "<button class='print-btn' onclick='printMessage(" + String(historyCount - 1 - i) + ")'>🖨️ Печать</button>";
+        historyHtml += "<button class='print-btn' onclick='printMessage(" + String(historyCount - 1 - i) + ")'>Печать</button>";
         historyHtml += "</div>";
+      }
+      
+      if (historyCount > 5) {
+        historyHtml += "<div class='info-note'>Показаны последние 5 из " + String(historyCount) + " сообщений</div>";
       }
     }
     xSemaphoreGive(xSemaphore);
@@ -916,6 +1047,12 @@ String getHistoryHTML() {
 
 // API для получения данных о погоде в JSON формате
 void handleWeatherData() {
+  // Проверяем подключение к WiFi перед запросом
+  if (WiFi.status() != WL_CONNECTED) {
+    server.send(200, "application/json", "{\"icon\":\"❌\",\"temperature\":\"Нет WiFi\",\"temp15\":\"--\",\"temp19\":\"--\"}");
+    return;
+  }
+  
   HTTPClient http;
   
   String url = "https://api.open-meteo.com/v1/forecast?";
@@ -925,6 +1062,8 @@ void handleWeatherData() {
   url += "&timezone=Europe/Moscow";
   
   http.begin(url);
+  http.setTimeout(5000); // Таймаут 5 секунд
+  
   int httpCode = http.GET();
   
   if (httpCode == 200) {
@@ -944,23 +1083,31 @@ void handleWeatherData() {
     String jsonResponse = "{";
     jsonResponse += "\"icon\":\"" + weatherIcon + "\",";
     jsonResponse += "\"temperature\":\"" + String(currentTemp, 1) + "°C\",";
-    jsonResponse += "\"temp15\":\"" + String(temp15, 1) + "\",";
-    jsonResponse += "\"temp19\":\"" + String(temp19, 1) + "\"";
+    jsonResponse += "\"temp15\":\"" + (temp15 != -999 ? String(temp15, 1) : "--") + "\",";
+    jsonResponse += "\"temp19\":\"" + (temp19 != -999 ? String(temp19, 1) : "--") + "\"";
     jsonResponse += "}";
     
     server.send(200, "application/json", jsonResponse);
   } else {
     http.end();
-    server.send(500, "application/json", "{\"error\":\"Failed to fetch weather\"}");
+    server.send(200, "application/json", "{\"icon\":\"❓\",\"temperature\":\"Ошибка\",\"temp15\":\"--\",\"temp19\":\"--\"}");
   }
 }
 
-// Главная страница
+// API для получения статуса WiFi
+void handleWifiStatus() {
+  String jsonResponse = "{";
+  jsonResponse += "\"connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
+  jsonResponse += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  jsonResponse += "\"attempts\":" + String(wifiReconnectAttempts);
+  jsonResponse += "}";
+  
+  server.send(200, "application/json", jsonResponse);
+}
+
+// Главная страница - использует кэш
 void handleRoot() {
-  String fullHtml = String(htmlPage);
-  fullHtml += getHistoryHTML();
-  fullHtml += getHtmlPageEnd();
-  server.send(200, "text/html; charset=UTF-8", fullHtml);
+  server.send(200, "text/html; charset=UTF-8", getCachedHomePage());
 }
 
 // API для получения только истории (для AJAX)
@@ -1048,22 +1195,10 @@ void setup() {
   // Инициализация термопринтера
   initThermalPrinter();
   
-  // Подключение к Wi-Fi
-  WiFi.begin(ssid, password);
-  Serial.print("Подключение к Wi-Fi");
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(".");
+  // Подключение к WiFi
+  if (!connectToWiFi()) {
+    Serial.println("❌ Не удалось подключиться к WiFi при запуске");
   }
-  
-  Serial.println("\n✅ Успешное подключение к WiFi!");
-  Serial.println("✅ Система готова к работе!");
-  Serial.print("📡 IP адрес: ");
-  Serial.println(WiFi.localIP());
-  
-  String wifiMessage = "Uspeshnoe podklyuchenie k WiFi! Sistema gotova k rabote. IP: " + WiFi.localIP().toString();
-  printToThermalPrinter(wifiMessage);
   
   // Инициализация NTP клиента
   timeClient.begin();
@@ -1088,6 +1223,7 @@ void setup() {
   server.on("/print", handlePrint);
   server.on("/print-weather", handlePrintWeather);
   server.on("/weather-data", handleWeatherData);
+  server.on("/wifi-status", handleWifiStatus);
   server.onNotFound(handleNotFound);
   
   // Запуск сервера
@@ -1117,12 +1253,17 @@ void setup() {
   Serial.println("Avtomaticheskaya pechat: 10:00 ezhednevno");
   Serial.println("Podderzhka mnozhestvennykh podklyucheniy: DA (mnogopotochnost)");
   Serial.println("Shirokie ASCII-ikonki na termoprintere: DA");
+  Serial.println("Avtomaticheskoe vosstanovlenie WiFi: DA");
+  Serial.println("Legkaya i bystraya web-stranica: DA");
   Serial.println("===================");
 }
 
 void loop() {
   // Периодически обновляем время от NTP сервера
   timeClient.update();
+  
+  // Проверяем и восстанавливаем WiFi соединение
+  checkWiFiConnection();
   
   // Проверяем автоматическую печать каждую минуту
   if (millis() - lastPrintCheck > 60000) {
