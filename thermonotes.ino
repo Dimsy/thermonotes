@@ -499,9 +499,7 @@ void printWeatherInfo() {
     ThermalPrinter.println("19:00: " + String(temp19, 1) + "C");
   }
   
-  ThermalPrinter.println("");
   ThermalPrinter.println("========================================");
-  ThermalPrinter.println("");
   ThermalPrinter.println("");
   ThermalPrinter.println(""); // Добавляем пустые строки для отрезания бумаги
   
