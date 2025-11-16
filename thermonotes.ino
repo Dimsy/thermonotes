@@ -1,0 +1,858 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <HardwareSerial.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+// Замените на свои учетные данные Wi-Fi
+const char* ssid = "test";
+const char* password = "test";
+
+WebServer server(80);
+
+// Настройка NTP клиента для московского времени
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 10800, 60000); // UTC+3 (Московское время)
+
+// Настройка Serial для термопринтера
+HardwareSerial ThermalPrinter(2); // Используем UART2
+
+// Пины для термопринтера
+#define PRINTER_TX_PIN 17
+#define PRINTER_RX_PIN 16
+
+// Координаты Москвы для Open-Meteo
+const float MOSCOW_LAT = 55.7558;
+const float MOSCOW_LON = 37.6173;
+
+// Структура для хранения сообщения и времени
+struct Message {
+  String text;
+  String timestamp;
+};
+
+// Массив для хранения истории (максимум 10 сообщений)
+Message messageHistory[10];
+int historyCount = 0;
+
+// Переменные для автоматической печати
+unsigned long lastPrintCheck = 0;
+bool todayPrinted = false;
+String lastPrintDate = "";
+
+// Семафор для защиты общих ресурсов
+SemaphoreHandle_t xSemaphore;
+
+// Функция инициализации термопринтера
+void initThermalPrinter() {
+  ThermalPrinter.begin(9600, SERIAL_8N1, PRINTER_RX_PIN, PRINTER_TX_PIN);
+  delay(2000);
+  
+  Serial.println("Thermal printer UART initialized at 9600 baud");
+  ThermalPrinter.println("Printer initialized");
+  delay(500);
+  Serial.println("Thermal printer ready");
+}
+
+// Функция транслитерации кириллицы в латиницу
+String transliterate(String text) {
+  String result = "";
+  
+  for (int i = 0; i < text.length(); i++) {
+    char c = text[i];
+    
+    if ((c & 0xE0) == 0xC0 && i + 1 < text.length()) {
+      unsigned char c1 = text[i];
+      unsigned char c2 = text[i + 1];
+      unsigned int unicode = ((c1 & 0x1F) << 6) | (c2 & 0x3F);
+      
+      switch (unicode) {
+        // Строчные русские буквы
+        case 0x430: result += "a"; i++; break;
+        case 0x431: result += "b"; i++; break;
+        case 0x432: result += "v"; i++; break;
+        case 0x433: result += "g"; i++; break;
+        case 0x434: result += "d"; i++; break;
+        case 0x435: result += "e"; i++; break;
+        case 0x451: result += "e"; i++; break;
+        case 0x436: result += "zh"; i++; break;
+        case 0x437: result += "z"; i++; break;
+        case 0x438: result += "i"; i++; break;
+        case 0x439: result += "y"; i++; break;
+        case 0x43A: result += "k"; i++; break;
+        case 0x43B: result += "l"; i++; break;
+        case 0x43C: result += "m"; i++; break;
+        case 0x43D: result += "n"; i++; break;
+        case 0x43E: result += "o"; i++; break;
+        case 0x43F: result += "p"; i++; break;
+        case 0x440: result += "r"; i++; break;
+        case 0x441: result += "s"; i++; break;
+        case 0x442: result += "t"; i++; break;
+        case 0x443: result += "u"; i++; break;
+        case 0x444: result += "f"; i++; break;
+        case 0x445: result += "kh"; i++; break;
+        case 0x446: result += "ts"; i++; break;
+        case 0x447: result += "ch"; i++; break;
+        case 0x448: result += "sh"; i++; break;
+        case 0x449: result += "shch"; i++; break;
+        case 0x44A: result += ""; i++; break;
+        case 0x44B: result += "y"; i++; break;
+        case 0x44C: result += ""; i++; break;
+        case 0x44D: result += "e"; i++; break;
+        case 0x44E: result += "yu"; i++; break;
+        case 0x44F: result += "ya"; i++; break;
+        
+        // Заглавные русские буквы
+        case 0x410: result += "A"; i++; break;
+        case 0x411: result += "B"; i++; break;
+        case 0x412: result += "V"; i++; break;
+        case 0x413: result += "G"; i++; break;
+        case 0x414: result += "D"; i++; break;
+        case 0x415: result += "E"; i++; break;
+        case 0x401: result += "E"; i++; break;
+        case 0x416: result += "Zh"; i++; break;
+        case 0x417: result += "Z"; i++; break;
+        case 0x418: result += "I"; i++; break;
+        case 0x419: result += "Y"; i++; break;
+        case 0x41A: result += "K"; i++; break;
+        case 0x41B: result += "L"; i++; break;
+        case 0x41C: result += "M"; i++; break;
+        case 0x41D: result += "N"; i++; break;
+        case 0x41E: result += "O"; i++; break;
+        case 0x41F: result += "P"; i++; break;
+        case 0x420: result += "R"; i++; break;
+        case 0x421: result += "S"; i++; break;
+        case 0x422: result += "T"; i++; break;
+        case 0x423: result += "U"; i++; break;
+        case 0x424: result += "F"; i++; break;
+        case 0x425: result += "Kh"; i++; break;
+        case 0x426: result += "Ts"; i++; break;
+        case 0x427: result += "Ch"; i++; break;
+        case 0x428: result += "Sh"; i++; break;
+        case 0x429: result += "Shch"; i++; break;
+        case 0x42A: result += ""; i++; break;
+        case 0x42B: result += "Y"; i++; break;
+        case 0x42C: result += ""; i++; break;
+        case 0x42D: result += "E"; i++; break;
+        case 0x42E: result += "Yu"; i++; break;
+        case 0x42F: result += "Ya"; i++; break;
+        
+        default: 
+          result += "?"; 
+          i++;
+          break;
+      }
+    } else {
+      result += c;
+    }
+  }
+  
+  return result;
+}
+
+// Функция для получения времени в формате HH:MM (только часы и минуты)
+String getShortMoscowTime() {
+  timeClient.update();
+  String time = timeClient.getFormattedTime();
+  return time.substring(0, 5);
+}
+
+// Функция для получения текущей даты в формате YYYY-MM-DD
+String getCurrentDateString() {
+  timeClient.update();
+  time_t rawTime = timeClient.getEpochTime();
+  struct tm *timeInfo;
+  timeInfo = localtime(&rawTime);
+  
+  char dateStr[11];
+  strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", timeInfo);
+  return String(dateStr);
+}
+
+// Функция для получения названия дня недели на русском
+String getDayOfWeek() {
+  timeClient.update();
+  time_t rawTime = timeClient.getEpochTime();
+  struct tm *timeInfo;
+  timeInfo = localtime(&rawTime);
+  
+  int dayOfWeek = timeInfo->tm_wday;
+  
+  switch(dayOfWeek) {
+    case 0: return "Воскресенье";
+    case 1: return "Понедельник";
+    case 2: return "Вторник";
+    case 3: return "Среда";
+    case 4: return "Четверг";
+    case 5: return "Пятница";
+    case 6: return "Суббота";
+    default: return "Неизвестно";
+  }
+}
+
+// Функция для получения названия месяца на русском
+String getMonthName() {
+  timeClient.update();
+  time_t rawTime = timeClient.getEpochTime();
+  struct tm *timeInfo;
+  timeInfo = localtime(&rawTime);
+  
+  int month = timeInfo->tm_mon;
+  
+  switch(month) {
+    case 0: return "января";
+    case 1: return "февраля";
+    case 2: return "марта";
+    case 3: return "апреля";
+    case 4: return "мая";
+    case 5: return "июня";
+    case 6: return "июля";
+    case 7: return "августа";
+    case 8: return "сентября";
+    case 9: return "октября";
+    case 10: return "ноября";
+    case 11: return "декабря";
+    default: return "неизвестно";
+  }
+}
+
+// Функция для получения текущей даты
+String getCurrentDate() {
+  timeClient.update();
+  time_t rawTime = timeClient.getEpochTime();
+  struct tm *timeInfo;
+  timeInfo = localtime(&rawTime);
+  
+  return String(timeInfo->tm_mday);
+}
+
+// Функция для получения текущей погоды из Open-Meteo
+String getCurrentWeather() {
+  HTTPClient http;
+  
+  String url = "https://api.open-meteo.com/v1/forecast?";
+  url += "latitude=" + String(MOSCOW_LAT, 6);
+  url += "&longitude=" + String(MOSCOW_LON, 6);
+  url += "&current=temperature_2m,weather_code";
+  url += "&timezone=Europe/Moscow";
+  
+  http.begin(url);
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(1024);
+    deserializeJson(doc, payload);
+    
+    float currentTemp = doc["current"]["temperature_2m"];
+    int weatherCode = doc["current"]["weather_code"];
+    
+    http.end();
+    
+    String weatherDesc = getWeatherDescription(weatherCode);
+    return "Seichas: " + String(currentTemp, 1) + " C, " + weatherDesc;
+  } else {
+    http.end();
+    return "Seichas: error";
+  }
+}
+
+// Функция для получения температуры на определенное время
+float getTemperatureForTime(String targetTime) {
+  HTTPClient http;
+  
+  String url = "https://api.open-meteo.com/v1/forecast?";
+  url += "latitude=" + String(MOSCOW_LAT, 6);
+  url += "&longitude=" + String(MOSCOW_LON, 6);
+  url += "&hourly=temperature_2m";
+  url += "&timezone=Europe/Moscow";
+  url += "&forecast_days=3";
+  
+  http.begin(url);
+  int httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(4096);
+    deserializeJson(doc, payload);
+    
+    JsonArray timeArray = doc["hourly"]["time"];
+    JsonArray tempArray = doc["hourly"]["temperature_2m"];
+    
+    timeClient.update();
+    time_t rawTime = timeClient.getEpochTime();
+    struct tm *timeInfo;
+    timeInfo = localtime(&rawTime);
+    
+    char today[11];
+    strftime(today, sizeof(today), "%Y-%m-%d", timeInfo);
+    
+    for (size_t i = 0; i < timeArray.size(); i++) {
+      String timeStr = timeArray[i].as<String>();
+      if (timeStr.indexOf(String(today) + "T" + targetTime) != -1) {
+        float temp = tempArray[i].as<float>();
+        http.end();
+        return temp;
+      }
+    }
+    
+    http.end();
+    return -999;
+  } else {
+    http.end();
+    return -999;
+  }
+}
+
+// Функция для преобразования кода погоды в текстовое описание
+String getWeatherDescription(int weatherCode) {
+  if (weatherCode == 0) return "iasno";
+  else if (weatherCode == 1) return "preimushchestvenno iasno";
+  else if (weatherCode == 2) return "peremennaya oblachnost";
+  else if (weatherCode == 3) return "pasmurno";
+  else if (weatherCode >= 45 && weatherCode <= 48) return "tuman";
+  else if (weatherCode >= 51 && weatherCode <= 55) return "moros";
+  else if (weatherCode >= 56 && weatherCode <= 57) return "ledyanaya moros";
+  else if (weatherCode >= 61 && weatherCode <= 65) return "dozhd";
+  else if (weatherCode >= 66 && weatherCode <= 67) return "ledyanoy dozhd";
+  else if (weatherCode >= 71 && weatherCode <= 75) return "sneg";
+  else if (weatherCode == 77) return "snezhnye zerna";
+  else if (weatherCode >= 80 && weatherCode <= 82) return "livnevyy dozhd";
+  else if (weatherCode >= 85 && weatherCode <= 86) return "livnevyy sneg";
+  else if (weatherCode >= 95 && weatherCode <= 99) return "groza";
+  else return "neizvestno";
+}
+
+// Функция печати текста на термопринтере
+void printToThermalPrinter(String text) {
+  String currentTime = getShortMoscowTime();
+  String transliteratedText = transliterate(text);
+  String printText = currentTime + " - " + transliteratedText;
+  
+  Serial.print("Printing: ");
+  Serial.println(printText);
+  
+  ThermalPrinter.println(printText);
+  delay(300);
+  Serial.println("Print completed");
+}
+
+// Функция для печати информации о погоде и дате
+void printWeatherInfo() {
+  Serial.println("Printing weather information...");
+  
+  String dayOfWeek = getDayOfWeek();
+  String currentDate = getCurrentDate();
+  String monthName = getMonthName();
+  
+  ThermalPrinter.println("----------------------------------------");
+  String dateLine = dayOfWeek + ", " + currentDate + " " + monthName;
+  ThermalPrinter.println(transliterate(dateLine));
+  ThermalPrinter.println("----------------------------------------");
+  
+  String currentWeather = getCurrentWeather();
+  ThermalPrinter.println(transliterate(currentWeather));
+  
+  float temp15 = getTemperatureForTime("15:00");
+  float temp19 = getTemperatureForTime("19:00");
+  
+  String forecastLine = "15:00: " + String(temp15, 1) + " C, 19:00: " + String(temp19, 1) + " C";
+  ThermalPrinter.println(transliterate(forecastLine));
+  
+  ThermalPrinter.println("----------------------------------------");
+  ThermalPrinter.println("");
+  ThermalPrinter.println("");
+  
+  delay(500);
+  Serial.println("Weather info print completed");
+}
+
+// Функция для проверки и автоматической печати в 10:00
+void checkAutoPrint() {
+  timeClient.update();
+  String currentTime = getShortMoscowTime();
+  String currentDate = getCurrentDateString();
+  
+  if (currentTime == "10:00") {
+    if (currentDate != lastPrintDate) {
+      Serial.println("Auto-printing weather info at 10:00");
+      printWeatherInfo();
+      todayPrinted = true;
+      lastPrintDate = currentDate;
+    }
+  } else if (currentTime == "00:01") {
+    todayPrinted = false;
+  }
+}
+
+// HTML страница с формой и историей
+const char* htmlPage = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 Input Form</title>
+  <style>
+    body { 
+      font-family: Arial, sans-serif; 
+      text-align: center; 
+      margin: 20px;
+      background-color: #f5f5f5;
+    }
+    .container {
+      background: white;
+      padding: 30px;
+      border-radius: 15px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    .form-section {
+      margin-bottom: 30px;
+      padding: 20px;
+      border-bottom: 2px solid #eee;
+    }
+    .history-section {
+      text-align: left;
+    }
+    input[type="text"] {
+      width: 70%;
+      padding: 12px;
+      margin: 10px 0;
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      font-size: 16px;
+    }
+    input[type="submit"] {
+      background: #4CAF50;
+      color: white;
+      padding: 12px 25px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 16px;
+      margin-left: 10px;
+    }
+    input[type="submit"]:hover {
+      background: #45a049;
+      transform: translateY(-2px);
+      transition: all 0.2s;
+    }
+    .print-btn {
+      background: #2196F3;
+      color: white;
+      padding: 8px 15px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 12px;
+      margin-left: 10px;
+    }
+    .print-btn:hover {
+      background: #1976D2;
+    }
+    .weather-btn {
+      background: #FF9800;
+      color: white;
+      padding: 12px 25px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 16px;
+      margin: 10px 5px;
+    }
+    .weather-btn:hover {
+      background: #F57C00;
+    }
+    .history-item {
+      background: #f8f9fa;
+      margin: 10px 0;
+      padding: 15px;
+      border-radius: 8px;
+      border-left: 4px solid #4CAF50;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .message-content {
+      flex-grow: 1;
+    }
+    .history-header {
+      color: #333;
+      margin-bottom: 20px;
+      font-size: 24px;
+    }
+    .empty-history {
+      color: #666;
+      font-style: italic;
+      padding: 20px;
+    }
+    .timestamp {
+      color: #888;
+      font-size: 12px;
+      margin-top: 5px;
+    }
+    .message-text {
+      color: #333;
+      font-size: 16px;
+      word-break: break-word;
+    }
+    .current-time {
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 20px;
+    }
+    .info-note {
+      color: #666;
+      font-size: 12px;
+      margin-top: 10px;
+      font-style: italic;
+    }
+    .input-group {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .weather-section {
+      margin: 20px 0;
+      padding: 15px;
+      background: #e3f2fd;
+      border-radius: 8px;
+    }
+    .auto-print-info {
+      background: #e8f5e8;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Форма ввода ESP32</h1>
+    <div class="current-time" id="currentTime"></div>
+    
+    <div class="auto-print-info">
+      <strong>Автоматическая печать:</strong> информация о погоде печатается автоматически каждый день в 10:00
+    </div>
+    
+    <div class="weather-section">
+      <h3>Погода в Москве</h3>
+      <button class="weather-btn" onclick="printWeather()">📅 Печать погоды и даты</button>
+      <div class="info-note">Распечатает текущую дату и прогноз погоды (Open-Meteo)</div>
+    </div>
+    
+    <div class="form-section">
+      <h3>Отправить новое сообщение</h3>
+      <form action="/submit" method="POST" id="messageForm">
+        <div class="input-group">
+          <input type="text" name="inputValue" id="inputValue" placeholder="Введите ваше сообщение..." required>
+          <input type="submit" value="Отправить">
+        </div>
+      </form>
+      <div class="info-note">Кириллица будет преобразована в латиницу в Serial Monitor и на принтере</div>
+    </div>
+
+    <div class="history-section">
+      <h3 class="history-header">История сообщений</h3>
+      <div id="historyList">
+        )rawliteral";
+
+// Вторая часть HTML
+String getHtmlPageEnd() {
+  return R"rawliteral(
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    function updateCurrentTime() {
+      const now = new Date();
+      const timeString = now.toLocaleString('ru-RU', {
+        timeZone: 'Europe/Moscow',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+      document.getElementById('currentTime').textContent = 'Текущее московское время: ' + timeString;
+    }
+    
+    function printMessage(index) {
+      fetch('/print?index=' + index)
+        .then(response => response.text())
+        .then(result => {
+          alert(result);
+        });
+    }
+    
+    function printWeather() {
+      fetch('/print-weather')
+        .then(response => response.text())
+        .then(result => {
+          alert(result);
+        });
+    }
+    
+    // Обновляем время каждую секунду
+    updateCurrentTime();
+    setInterval(updateCurrentTime, 1000);
+    
+    // Автоматическое обновление истории каждые 3 секунды
+    setInterval(function() {
+      fetch('/history')
+        .then(response => response.text())
+        .then(html => {
+          document.getElementById('historyList').innerHTML = html;
+        });
+    }, 3000);
+  </script>
+</body>
+</html>
+)rawliteral";
+}
+
+// Функция для получения московского времени в формате HH:MM:SS
+String getMoscowTime() {
+  timeClient.update();
+  String formattedTime = timeClient.getFormattedTime();
+  time_t rawTime = timeClient.getEpochTime();
+  struct tm *timeInfo;
+  timeInfo = localtime(&rawTime);
+  
+  char dateTimeStr[20];
+  snprintf(dateTimeStr, sizeof(dateTimeStr), "%02d.%02d.%04d %s", 
+           timeInfo->tm_mday, timeInfo->tm_mon + 1, timeInfo->tm_year + 1900, 
+           formattedTime.c_str());
+  
+  return String(dateTimeStr);
+}
+
+// Функция для безопасного добавления сообщения в историю
+void addMessageToHistory(String text, String timestamp) {
+  if (xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
+    Message newMessage;
+    newMessage.text = text;
+    newMessage.timestamp = timestamp;
+    
+    if (historyCount < 10) {
+      messageHistory[historyCount] = newMessage;
+      historyCount++;
+    } else {
+      for (int i = 0; i < 9; i++) {
+        messageHistory[i] = messageHistory[i + 1];
+      }
+      messageHistory[9] = newMessage;
+    }
+    xSemaphoreGive(xSemaphore);
+  }
+}
+
+// Функция для безопасного получения HTML истории
+String getHistoryHTML() {
+  String historyHtml = "";
+  
+  if (xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
+    if (historyCount == 0) {
+      historyHtml = "<div class='empty-history'>История сообщений пуста</div>";
+    } else {
+      for (int i = historyCount - 1; i >= 0; i--) {
+        historyHtml += "<div class='history-item'>";
+        historyHtml += "<div class='message-content'>";
+        historyHtml += "<div class='message-text'><strong>" + messageHistory[i].text + "</strong></div>";
+        historyHtml += "<div class='timestamp'>Отправлено: " + messageHistory[i].timestamp + "</div>";
+        historyHtml += "</div>";
+        historyHtml += "<button class='print-btn' onclick='printMessage(" + String(historyCount - 1 - i) + ")'>Печать</button>";
+        historyHtml += "</div>";
+      }
+    }
+    xSemaphoreGive(xSemaphore);
+  }
+  
+  return historyHtml;
+}
+
+// Главная страница
+void handleRoot() {
+  String fullHtml = String(htmlPage);
+  fullHtml += getHistoryHTML();
+  fullHtml += getHtmlPageEnd();
+  server.send(200, "text/html; charset=UTF-8", fullHtml);
+}
+
+// API для получения только истории (для AJAX)
+void handleHistory() {
+  server.send(200, "text/html; charset=UTF-8", getHistoryHTML());
+}
+
+// Обработка печати сообщения
+void handlePrint() {
+  if (server.hasArg("index")) {
+    int index = server.arg("index").toInt();
+    int actualIndex = historyCount - 1 - index;
+    
+    if (actualIndex >= 0 && actualIndex < historyCount) {
+      String messageToPrint;
+      
+      if (xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
+        messageToPrint = messageHistory[actualIndex].text;
+        xSemaphoreGive(xSemaphore);
+      }
+      
+      Serial.println("Printing message: " + messageToPrint);
+      printToThermalPrinter(messageToPrint);
+      
+      server.send(200, "text/plain", "Сообщение отправлено на печать: " + messageToPrint);
+    } else {
+      server.send(400, "text/plain", "Ошибка: неверный индекс сообщения");
+    }
+  } else {
+    server.send(400, "text/plain", "Ошибка: параметр index не указан");
+  }
+}
+
+// Обработка печати информации о погоде
+void handlePrintWeather() {
+  Serial.println("Printing weather information...");
+  printWeatherInfo();
+  server.send(200, "text/plain", "Информация о погоде отправлена на печать");
+}
+
+// Обработка отправки формы
+void handleSubmit() {
+  if (server.hasArg("inputValue")) {
+    String inputValue = server.arg("inputValue");
+    String currentTime = getMoscowTime();
+    String shortTime = getShortMoscowTime();
+    
+    String transliteratedText = transliterate(inputValue);
+    Serial.println(shortTime + ": " + transliteratedText);
+    
+    printToThermalPrinter(inputValue);
+    
+    addMessageToHistory(inputValue, currentTime);
+    
+    server.sendHeader("Location", "/");
+    server.send(303);
+  } else {
+    server.send(400, "text/plain", "Ошибка: поле inputValue не найдено");
+  }
+}
+
+// Обработка несуществующих страниц
+void handleNotFound() {
+  String response = "<!DOCTYPE HTML><html><head><meta charset=\"UTF-8\"></head><body>";
+  response += "<h2>Страница не найдена</h2>";
+  response += "<a href='/'>Вернуться на главную</a>";
+  response += "</body></html>";
+  server.send(404, "text/html; charset=UTF-8", response);
+}
+
+// Задача для обработки веб-сервера в отдельном потоке
+void webServerTask(void *parameter) {
+  for(;;) {
+    server.handleClient();
+    delay(1);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Создание семафора для защиты общих ресурсов
+  xSemaphore = xSemaphoreCreateMutex();
+  
+  // Инициализация термопринтера
+  initThermalPrinter();
+  
+  // Подключение к Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.print("Подключение к Wi-Fi");
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+  
+  Serial.println("\n✅ Успешное подключение к WiFi!");
+  Serial.println("✅ Система готова к работе!");
+  Serial.print("📡 IP адрес: ");
+  Serial.println(WiFi.localIP());
+  
+  String wifiMessage = "Успешное подключение к WiFi! Система готова к работе. IP: " + WiFi.localIP().toString();
+  printToThermalPrinter(wifiMessage);
+  
+  // Инициализация NTP клиента
+  timeClient.begin();
+  timeClient.setTimeOffset(10800);
+  
+  Serial.print("⏰ Получение времени от NTP сервера");
+  for (int i = 0; i < 10; i++) {
+    if (timeClient.update()) {
+      Serial.println("\n✅ Время получено!");
+      break;
+    }
+    Serial.print(".");
+    delay(1000);
+  }
+  
+  lastPrintDate = getCurrentDateString();
+  
+  // Настройка маршрутов
+  server.on("/", handleRoot);
+  server.on("/submit", HTTP_POST, handleSubmit);
+  server.on("/history", handleHistory);
+  server.on("/print", handlePrint);
+  server.on("/print-weather", handlePrintWeather);
+  server.onNotFound(handleNotFound);
+  
+  // Запуск сервера
+  server.begin();
+  Serial.println("🌐 HTTP сервер запущен");
+  
+  // Создание отдельного потока для веб-сервера
+  xTaskCreatePinnedToCore(
+    webServerTask,   // Функция задачи
+    "WebServer",     // Имя задачи
+    10000,           // Размер стека
+    NULL,            // Параметры
+    1,               // Приоритет
+    NULL,            // Дескриптор задачи
+    0                // Ядро (Core 0)
+  );
+  
+  String startupTime = getShortMoscowTime();
+  String moscowTime = getMoscowTime();
+  Serial.println(startupTime + ": Система запущена. Готов к приему сообщений.");
+  Serial.println(startupTime + ": Текущее московское время: " + moscowTime);
+  Serial.println(startupTime + ": Автоматическая печать погоды активирована (10:00 каждый день)");
+  
+  Serial.println("\n=== ИНФОРМАЦИЯ ===");
+  Serial.println("Используется Open-Meteo API - бесплатно, без API ключа");
+  Serial.println("Прогноз погоды для Москвы");
+  Serial.println("Автоматическая печать: 10:00 ежедневно");
+  Serial.println("Поддержка множественных подключений: ДА (многопоточность)");
+  Serial.println("===================");
+}
+
+void loop() {
+  // Периодически обновляем время от NTP сервера
+  timeClient.update();
+  
+  // Проверяем автоматическую печать каждую минуту
+  if (millis() - lastPrintCheck > 60000) {
+    checkAutoPrint();
+    lastPrintCheck = millis();
+  }
+  
+  delay(100);
+}
