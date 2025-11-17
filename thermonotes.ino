@@ -439,8 +439,8 @@ bool connectToWiFi() {
     wifiReconnectAttempts = 0;
     
     // Печатаем сообщение о подключении
-    String wifiMessage = "Uspeshnoe podklyuchenie k WiFi! IP: " + WiFi.localIP().toString();
-    printToThermalPrinter(wifiMessage);
+    // String wifiMessage = "Uspeshnoe podklyuchenie k WiFi! IP: " + WiFi.localIP().toString();
+    // printToThermalPrinter(wifiMessage);
     
     return true;
   } else {
@@ -726,64 +726,53 @@ String getWeatherAsciiArt(int weatherCode) {
     "     \\  /      \n"
     "   _ /\"\".-.    \n"
     "     \\_(   ).  \n"
-    "     /(___(__) \n"
-    "               \n";
+    "     /(___(__) \n";
   }
   else if (weatherCode == 2) { // Переменная облачность
     return 
     "    .-.        \n"
     " .-(    ).     \n"
-    "(___.__)__)    \n"
-    "               \n"
-    "               \n";
+    "(___.__)__)    \n";
   }
   else if (weatherCode == 3) { // Пасмурно
     return 
-    "               \n"
     "    .--.       \n"
     " .-(    ).     \n"
-    "(___.__)__)    \n"
-    "               \n";
+    "(___.__)__)    \n";
   }
   else if (weatherCode >= 45 && weatherCode <= 48) { // Туман
     return 
-    "               \n"
     " _ - _ - _ - _ \n"
     "  _ - _ - _ -  \n"
-    "_ - _ - _ - _  \n"
-    "               \n";
+    "_ - _ - _ - _  \n";
   }
   else if (weatherCode >= 51 && weatherCode <= 67) { // Дождь
     return 
     "    .--.       \n"
     " .-(    ).     \n"
     "(___.__)__)    \n"
-    "  '  '  '  '   \n"
-    " '  '  '  '    \n";
+    "  '  '  '  '   \n";
   }
   else if (weatherCode >= 71 && weatherCode <= 86) { // Снег
     return 
     "    .--.       \n"
     " .-(    ).     \n"
     "(___.__)__)    \n"
-    "  *  *  *  *   \n"
-    " *  *  *  *    \n";
+    "  *  *  *  *   \n";
   }
   else if (weatherCode >= 95 && weatherCode <= 99) { // Гроза
     return 
     "    .--.       \n"
     " .-(    ).     \n"
     "(___.__)__)    \n"
-    "   /\\    /\\    \n"
-    "  /  \\  /  \\   \n";
+    "   /\\    /\\    \n";
   }
   else { // Неизвестно
     return 
     "               \n"
     "   ???????     \n"
     "  ?       ?    \n"
-    "   ???????     \n"
-    "               \n";
+    "   ???????     \n";
   }
 }
 
@@ -943,11 +932,10 @@ void printWeatherInfo() {
   if (temp19 != -999) {
     ThermalPrinter.println("19:00: " + String(temp19, 1) + "C");
   }
-  
-  ThermalPrinter.println("========================================");
+  delay(500);
   ThermalPrinter.println("");
-  ThermalPrinter.println(""); // Добавляем пустые строки для отрезания бумаги
-  
+  ThermalPrinter.println("==========================");
+
   delay(500);
   Serial.println("Weather info with ASCII art print completed");
 }
